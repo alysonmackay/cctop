@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .models import Calculation, Status
+from .models import Calculation, JobType, Status
 from .scan import summarize_status
 
 
@@ -61,6 +61,7 @@ def single_report(calc: Calculation, root: Path | None = None) -> str:
         ("Status", calc.status.value),
         ("Program", _none_dash(calc.program)),
         ("Version", _none_dash(calc.version)),
+        ("Job type", calc.job_type.value),
         ("Method", _none_dash(calc.method)),
         ("Basis", _none_dash(calc.basis)),
         ("Charge/Mult", _charge_mult(calc)),

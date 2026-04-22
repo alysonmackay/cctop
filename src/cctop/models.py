@@ -12,6 +12,15 @@ class Status(str, Enum):
     SUSPICIOUS = "SUSPICIOUS"
     UNKNOWN = "UNKNOWN"
 
+class JobType(str, Enum):
+    SP = "SP"
+    OPT = "OPT" 
+    FREQ = "FREQ" 
+    OPTTS = "OPTTS" 
+    CASSCF = "CASSCF"
+    MRCI = "MRCI" 
+    TDDFT = "TDDFT"
+    UNKNOWN = "UNKNOWN"
 
 @dataclass(slots=True)
 class Warning:
@@ -30,6 +39,7 @@ class Calculation:
     basis: str | None = None
     charge: int | None = None
     multiplicity: int | None = None
+    job_type: JobType = JobType.UNKNOWN
     final_energy: float | None = None
     gibbs_energy: float | None = None
     imaginary_frequency_count: int | None = None

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import enum
 import re
 import time
 from pathlib import Path
 
-from .models import Calculation, Status, Warning
+from .models import Calculation, JobType, Status, Warning
 
 
 FLOAT_RE = r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[Ee][-+]?\d+)?"
@@ -65,17 +66,20 @@ METHOD_SKIP = {
     "sp",
 }
 
+def _strip_echo_prefix(line: str) -> str:
+    return re.sub(r"^\|\s*\d+>\s*", "", line).strip()
 
 def parse_orca(path: Path) -> Calculation:
     text = path.read_text(errors="replace")
     lines = text.splitlines()
     calc = Calculation(path=path, program="ORCA")
 
-    calc.version = _first_match(text, r"Program Version\s+([^\s]+)")
+    calc.version = _first_match(text, r"Program Version\s+([^\s]+)") 
     command_line = _find_orca_command(lines)
     if command_line:
         calc.method, calc.basis = _parse_method_basis(command_line)
 
+    calc.job_type = _detect_job_type(lines)
     charge_mult = _find_charge_multiplicity(lines)
     if charge_mult:
         calc.charge, calc.multiplicity = charge_mult
@@ -131,15 +135,18 @@ def _last_float_match(text: str, patterns: list[str]) -> float | None:
 def _find_orca_command(lines: list[str]) -> str | None:
     in_input = False
     for line in lines:
+        stripped = re.sub(r"^\|\s*\d+>\s*", "", line).strip() #stripping input echo line numbers 
+
         if "INPUT FILE" in line:
             in_input = True
             continue
-        if in_input and line.strip().startswith("!"):
-            return line.strip()
+        if in_input and stripped.startswith("!"):
+            return stripped
 
     for line in lines[:500]:
-        if line.strip().startswith("!"):
-            return line.strip()
+        stripped = re.sub(r"^\|\s*\d+>\s*", "", line).strip()
+        if stripped.startswith("!"):
+            return stripped
     return None
 
 
@@ -163,9 +170,10 @@ def _parse_method_basis(command_line: str) -> tuple[str | None, str | None]:
 def _find_charge_multiplicity(lines: list[str]) -> tuple[int, int] | None:
     pattern = re.compile(r"^\s*\*\s+(?:xyz|int|gzmt|xyzfile)\s+(-?\d+)\s+(\d+)", re.I)
     for line in lines:
-        match = pattern.search(line)
-        if match:
-            return int(match.group(1)), int(match.group(2))
+        stripped = re.sub(r"^\|\s*\d+>\s*", "", line).strip()
+       # match = pattern.search(stripped)
+        if pattern.search(stripped):
+            return int(pattern.search(stripped).group(1)), int(pattern.search(stripped).group(2))
     return None
 
 
@@ -206,7 +214,6 @@ def _parse_termination(text: str) -> str | None:
     if re.search(r"\bORCA finished by error termination\b", text, re.I):
         return "error"
     return None
-
 
 def _collect_warnings(lines: list[str], frequencies: list[float]) -> list[Warning]:
     warnings: list[Warning] = []
@@ -263,3 +270,28 @@ def _looks_recent(path: Path) -> bool:
     except OSError:
         return False
     return age_seconds < 2 * 60 * 60
+
+
+def _detect_job_type(lines: list[str]) -> JobType:
+    keyword_line = ""
+    block_keywords = set() 
+
+    for line in lines:
+        stripped = _strip_echo_prefix(line) 
+        if stripped.startswith("!"):
+            keyword_line += " " + stripped.lstrip("!").lower()
+        elif stripped.startswith("%"):
+            block_keywords.add(stripped.lstrip("%").split()[0].lower())
+
+    if "casscf" in block_keywords:
+        return JobType.CASSCF 
+    if "mrci" in block_keywords:
+        return JobType.MRCI
+    if "tddft" in block_keywords:
+        return JobType.TDDFT
+
+    #tokens = set(keyword_line.split())
+    if "opt" in keyword_line:
+        return JobType.OPT
+
+    return JobType.SP
