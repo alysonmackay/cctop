@@ -90,6 +90,65 @@ TOTAL RUN TIME: 0 days 1 hours 2 minutes 3 seconds
 ****ORCA TERMINATED NORMALLY****
 """
 
+ORCA_CONVERGED_OPT_WITH_INTERMEDIATE_NOT_CONVERGED = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+! B3LYP def2-SVP Opt Freq
+* xyz 0 1
+H 0 0 0
+H 0 0 1
+*
+
+GEOMETRY OPTIMIZATION CYCLE   1
+Geometry optimization has not yet converged.
+FINAL SINGLE POINT ENERGY     -1.010000000
+
+GEOMETRY OPTIMIZATION CYCLE   2
+Geometry optimization has not yet converged.
+FINAL SINGLE POINT ENERGY     -1.120000000
+
+GEOMETRY OPTIMIZATION CYCLE   3
+THE OPTIMIZATION HAS CONVERGED
+FINAL SINGLE POINT ENERGY     -1.123456789
+
+VIBRATIONAL FREQUENCIES
+   0:        102.33 cm**-1
+   1:        240.12 cm**-1
+NORMAL MODES
+
+TOTAL RUN TIME: 0 days 1 hours 2 minutes 3 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+
+ORCA_TS_WITH_MULTIPLE_FREQUENCY_BLOCKS = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+! B3LYP def2-SVP OptTS Freq
+* xyz 0 1
+H 0 0 0
+H 0 0 1
+*
+
+VIBRATIONAL FREQUENCIES
+   0:       -421.50 cm**-1
+   1:         88.10 cm**-1
+NORMAL MODES
+
+FINAL SINGLE POINT ENERGY     -1.120000000
+
+VIBRATIONAL FREQUENCIES
+   0:       -187.25 cm**-1
+   1:         95.40 cm**-1
+NORMAL MODES
+
+TOTAL RUN TIME: 0 days 1 hours 2 minutes 3 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+
 
 class OrcaParserTest(unittest.TestCase):
     def test_done_output(self) -> None:
@@ -131,6 +190,17 @@ class OrcaParserTest(unittest.TestCase):
         calc = self._parse(ORCA_MAX_ITER_REACHED)
         self.assertEqual(calc.status, Status.SUSPICIOUS)
         self.assertEqual(calc.warning_count, 1)
+
+    def test_intermediate_geometry_not_yet_converged_is_done(self) -> None:
+        calc = self._parse(ORCA_CONVERGED_OPT_WITH_INTERMEDIATE_NOT_CONVERGED)
+        self.assertEqual(calc.status, Status.DONE)
+        self.assertEqual(calc.warning_count, 0)
+
+    def test_uses_latest_frequency_block(self) -> None:
+        calc = self._parse(ORCA_TS_WITH_MULTIPLE_FREQUENCY_BLOCKS)
+        self.assertEqual(calc.status, Status.SUSPICIOUS)
+        self.assertEqual(calc.imaginary_frequency_count, 1)
+        self.assertAlmostEqual(calc.lowest_frequency or 0.0, -187.25)
 
     def _parse(self, content: str):
         with tempfile.TemporaryDirectory() as tmp:

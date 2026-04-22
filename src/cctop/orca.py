@@ -17,7 +17,14 @@ FATAL_PATTERNS = [
 ]
 
 SUSPICIOUS_PATTERNS = [
-    ("GEOM_NOT_CONVERGED", "Geometry optimization did not converge", re.compile(r"geometry optimization.*not.*converged|optimization.*not.*converged", re.I)),
+    (
+        "GEOM_NOT_CONVERGED",
+        "Geometry optimization did not converge",
+        re.compile(
+            r"(?:geometry\s+)?optimization\s+(?:has\s+)?(?:did\s+not|not)\s+converge(?:d)?\b",
+            re.I,
+        ),
+    ),
     (
         "MAX_ITER",
         "Maximum iteration limit was reached",
@@ -178,22 +185,29 @@ def _find_charge_multiplicity(lines: list[str]) -> tuple[int, int] | None:
 
 
 def _parse_frequencies(lines: list[str]) -> list[float]:
-    frequencies: list[float] = []
+    latest_frequencies: list[float] = []
+    current_frequencies: list[float] = []
     in_block = False
     for line in lines:
         if "VIBRATIONAL FREQUENCIES" in line:
+            current_frequencies = []
             in_block = True
             continue
         if in_block and line.strip().startswith("NORMAL MODES"):
-            break
+            latest_frequencies = current_frequencies
+            current_frequencies = []
+            in_block = False
+            continue
         if not in_block:
             continue
 
         match = re.search(r"^\s*\d+\s*:\s*(" + FLOAT_RE + r")\s+cm\*\*-1", line)
         if match:
-            frequencies.append(float(match.group(1)))
+            current_frequencies.append(float(match.group(1)))
 
-    return frequencies
+    if in_block:
+        latest_frequencies = current_frequencies
+    return latest_frequencies
 
 
 def _parse_runtime_seconds(text: str) -> int | None:
