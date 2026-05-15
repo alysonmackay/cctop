@@ -30,6 +30,31 @@ class Warning:
 
 
 @dataclass(slots=True)
+class ConfigWeight:
+    weight: float
+    occupation: str
+
+
+@dataclass(slots=True)
+class McscfState:
+    root: int
+    energy: float
+    multiplicity: int | None = None
+    block: int | None = None
+    reference_weight: float | None = None
+    weights: list[ConfigWeight] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class NevptResult:
+    root: int
+    multiplicity: int | None
+    reference_energy: float
+    correction: float
+    total_energy: float
+
+
+@dataclass(slots=True)
 class Calculation:
     path: Path
     program: str = "UNKNOWN"
@@ -45,8 +70,14 @@ class Calculation:
     imaginary_frequency_count: int | None = None
     lowest_frequency: float | None = None
     runtime_seconds: int | None = None
+    nprocs: int | None = None
+    maxcore_mb: int | None = None
     termination: str | None = None
     warnings: list[Warning] = field(default_factory=list)
+    casscf_final_energy: float | None = None
+    casscf_states: list[McscfState] = field(default_factory=list)
+    mrci_states: list[McscfState] = field(default_factory=list)
+    nevpt2_results: list[NevptResult] = field(default_factory=list)
 
     @property
     def warning_count(self) -> int:
@@ -58,6 +89,8 @@ class Calculation:
         record["status"] = self.status.value
         record["warnings"] = [asdict(warning) for warning in self.warnings]
         record["warning_count"] = self.warning_count
+        for key in ("casscf_final_energy", "casscf_states", "mrci_states", "nevpt2_results"):
+            record.pop(key, None)
         return record
 
 
@@ -75,6 +108,8 @@ EXPORT_FIELDS = [
     "imaginary_frequency_count",
     "lowest_frequency",
     "runtime_seconds",
+    "nprocs",
+    "maxcore_mb",
     "termination",
     "warning_count",
 ]

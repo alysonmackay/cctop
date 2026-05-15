@@ -5,7 +5,15 @@ import re
 import time
 from pathlib import Path
 
-from .models import Calculation, JobType, Status, Warning
+from .models import (
+    Calculation,
+    ConfigWeight,
+    JobType,
+    McscfState,
+    NevptResult,
+    Status,
+    Warning,
+)
 
 
 FLOAT_RE = r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[Ee][-+]?\d+)?"
@@ -112,7 +120,14 @@ def parse_orca(path: Path) -> Calculation:
         calc.imaginary_frequency_count = None
 
     calc.runtime_seconds = _parse_runtime_seconds(text)
+    calc.nprocs, calc.maxcore_mb = _parse_resources(lines, text)
     calc.termination = _parse_termination(text)
+
+    calc.casscf_final_energy = _parse_casscf_final_energy(text)
+    calc.casscf_states = _parse_casscf_states(lines)
+    calc.mrci_states = _parse_mrci_states(lines)
+    calc.nevpt2_results = _parse_nevpt2_results(lines)
+
     calc.warnings.extend(_collect_warnings(lines, frequencies))
     calc.status = _classify(calc, text)
     return calc
@@ -222,6 +237,43 @@ def _parse_runtime_seconds(text: str) -> int | None:
     return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
 
 
+def _parse_resources(lines: list[str], text: str) -> tuple[int | None, int | None]:
+    nprocs: int | None = None
+    maxcore: int | None = None
+
+    pal_block = re.compile(r"%\s*pal\b.*?nprocs\s+(\d+)", re.I | re.S)
+    pal_inline = re.compile(r"nprocs\s+(\d+)", re.I)
+    maxcore_inline = re.compile(r"%\s*maxcore\s+(\d+)", re.I)
+
+    for line in lines:
+        stripped = _strip_echo_prefix(line)
+        if nprocs is None:
+            match = pal_inline.search(stripped) if stripped.lower().startswith(("%pal", "nprocs")) else None
+            if match:
+                nprocs = int(match.group(1))
+        if maxcore is None:
+            match = maxcore_inline.search(stripped)
+            if match:
+                maxcore = int(match.group(1))
+        if nprocs is not None and maxcore is not None:
+            break
+
+    if nprocs is None:
+        match = pal_block.search(text)
+        if match:
+            nprocs = int(match.group(1))
+    if nprocs is None:
+        match = re.search(r"Program running with\s+(\d+)\s+parallel MPI-processes", text, re.I)
+        if match:
+            nprocs = int(match.group(1))
+    if maxcore is None:
+        match = re.search(r"MaxCore\s*=\s*(\d+)\s*MB", text, re.I)
+        if match:
+            maxcore = int(match.group(1))
+
+    return nprocs, maxcore
+
+
 def _parse_termination(text: str) -> str | None:
     if re.search(r"\*\*\*\*ORCA TERMINATED NORMALLY\*\*\*\*", text):
         return "normal"
@@ -309,3 +361,178 @@ def _detect_job_type(lines: list[str]) -> JobType:
         return JobType.OPT
 
     return JobType.SP
+
+
+CASSCF_BLOCK_HEADER = re.compile(
+    r"CAS-SCF STATES FOR BLOCK\s+(\d+)\s+MULT=\s*(\d+)\s+NROOTS=\s*(\d+)",
+    re.I,
+)
+CASSCF_ROOT_HEADER = re.compile(r"^\s*ROOT\s+(\d+):\s+E=\s*(" + FLOAT_RE + r")\s+Eh", re.I)
+CASSCF_WEIGHT_LINE = re.compile(r"^\s+(\d+\.\d+)\s+\[\s*\d+\s*\]:\s*(\S+)")
+
+MRCI_STATE_HEADER = re.compile(
+    r"^\s*STATE\s+(\d+):\s+Energy=\s*(" + FLOAT_RE + r")\s+Eh\s+RefWeight=\s*(" + FLOAT_RE + r")",
+    re.I,
+)
+MRCI_WEIGHT_LINE = re.compile(r"^\s+(\d+\.\d+)\s+:\s+(.+?)\s*$")
+
+NEVPT_BLOCK_HEADER = re.compile(r"MULT\s+(\d+)\s*,\s*ROOT\s+(\d+)", re.I)
+NEVPT_CORRECTION = re.compile(r"Total Energy Correction\s*:\s*dE\s*=\s*(" + FLOAT_RE + r")", re.I)
+NEVPT_REFERENCE = re.compile(r"Reference\s+Energy\s*:\s*E0\s*=\s*(" + FLOAT_RE + r")", re.I)
+NEVPT_TOTAL = re.compile(r"Total Energy \(E0\+dE\)\s*:\s*E\s*=\s*(" + FLOAT_RE + r")", re.I)
+
+
+def _parse_casscf_final_energy(text: str) -> float | None:
+    match = re.search(r"Final CASSCF energy\s*:\s*(" + FLOAT_RE + r")\s+Eh", text, re.I)
+    return float(match.group(1)) if match else None
+
+
+def _parse_casscf_states(lines: list[str]) -> list[McscfState]:
+    states: list[McscfState] = []
+    block: int | None = None
+    mult: int | None = None
+    current: McscfState | None = None
+
+    for line in lines:
+        header = CASSCF_BLOCK_HEADER.search(line)
+        if header:
+            block = int(header.group(1))
+            mult = int(header.group(2))
+            current = None
+            continue
+        if block is None:
+            continue
+
+        root = CASSCF_ROOT_HEADER.match(line)
+        if root:
+            current = McscfState(
+                root=int(root.group(1)),
+                energy=float(root.group(2)),
+                multiplicity=mult,
+                block=block,
+            )
+            states.append(current)
+            continue
+
+        if current is None:
+            continue
+
+        weight = CASSCF_WEIGHT_LINE.match(line)
+        if weight:
+            current.weights.append(
+                ConfigWeight(weight=float(weight.group(1)), occupation=weight.group(2))
+            )
+            continue
+
+        stripped = line.strip()
+        if stripped and not weight and not stripped.startswith("ROOT"):
+            current = None
+
+    return states
+
+
+def _parse_mrci_states(lines: list[str]) -> list[McscfState]:
+    states: list[McscfState] = []
+    current: McscfState | None = None
+    in_ci_results = False
+
+    for line in lines:
+        if "CI-RESULTS" in line:
+            in_ci_results = True
+            current = None
+            continue
+        if not in_ci_results:
+            continue
+
+        header = MRCI_STATE_HEADER.match(line)
+        if header:
+            current = McscfState(
+                root=int(header.group(1)),
+                energy=float(header.group(2)),
+                reference_weight=float(header.group(3)),
+            )
+            states.append(current)
+            continue
+
+        if current is None:
+            continue
+
+        weight = MRCI_WEIGHT_LINE.match(line)
+        if weight:
+            current.weights.append(
+                ConfigWeight(weight=float(weight.group(1)), occupation=weight.group(2))
+            )
+            continue
+
+        if line.strip().startswith(("DENSITY", "Storing", "Now choosing", "===", "---")):
+            current = None
+            in_ci_results = False
+
+    return states
+
+
+def _parse_nevpt2_results(lines: list[str]) -> list[NevptResult]:
+    results: list[NevptResult] = []
+    mult: int | None = None
+    root: int | None = None
+    correction: float | None = None
+    reference: float | None = None
+    total: float | None = None
+
+    def flush() -> None:
+        nonlocal correction, reference, total
+        if (
+            root is not None
+            and correction is not None
+            and reference is not None
+            and total is not None
+        ):
+            results.append(
+                NevptResult(
+                    root=root,
+                    multiplicity=mult,
+                    reference_energy=reference,
+                    correction=correction,
+                    total_energy=total,
+                )
+            )
+        correction = reference = total = None
+
+    in_nevpt2 = False
+    for line in lines:
+        if "NEVPT2 Results" in line:
+            in_nevpt2 = True
+            continue
+        if not in_nevpt2:
+            continue
+
+        header = NEVPT_BLOCK_HEADER.search(line)
+        if header:
+            flush()
+            mult = int(header.group(1))
+            root = int(header.group(2))
+            continue
+
+        if root is None:
+            continue
+
+        match = NEVPT_CORRECTION.search(line)
+        if match:
+            correction = float(match.group(1))
+            continue
+        match = NEVPT_REFERENCE.search(line)
+        if match:
+            reference = float(match.group(1))
+            continue
+        match = NEVPT_TOTAL.search(line)
+        if match:
+            total = float(match.group(1))
+            flush()
+            continue
+
+        if line.strip().startswith("TIMINGS"):
+            flush()
+            in_nevpt2 = False
+
+    flush()
+    return results
