@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compchem-cctop"
-version = "0.1.5"
+version = "0.2.0"
 description = "A minimal terminal dashboard for computational chemistry output files."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,7 +25,10 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Chemistry",
 ]
-dependencies = []
+dependencies = [
+  "textual>=0.85",
+  "rich>=13.7",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -37,6 +40,9 @@ cctop = "cctop.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+cctop = ["*.tcss"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

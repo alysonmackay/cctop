@@ -1,0 +1,80 @@
+Screen {
+    background: $surface;
+}
+
+Header {
+    background: $boost;
+    color: $accent;
+    text-style: bold;
+}
+
+#summary {
+    height: 1;
+    padding: 0 2;
+    background: $boost;
+}
+
+#statusbar {
+    height: 1;
+    padding: 0 2;
+    background: $panel;
+    color: $text-muted;
+    dock: bottom;
+}
+
+#body {
+    height: 1fr;
+}
+
+#left {
+    width: 55%;
+    padding: 0 1;
+}
+
+#right {
+    width: 45%;
+    padding: 0 1;
+    border-left: vkey $primary-darken-2;
+}
+
+#search {
+    height: 3;
+    margin: 0 0 1 0;
+    border: round $accent;
+    background: $surface;
+}
+
+#search:focus {
+    border: round $success;
+}
+
+#table {
+    height: 1fr;
+    border: round $primary-darken-2;
+    background: $surface;
+}
+
+#table > .datatable--header {
+    background: $boost;
+    color: $accent;
+    text-style: bold;
+}
+
+#table > .datatable--cursor {
+    background: $accent 30%;
+    text-style: bold;
+}
+
+#table > .datatable--hover {
+    background: $boost;
+}
+
+#details {
+    padding: 1 1;
+    background: $surface;
+    height: auto;
+}
+
+Footer {
+    background: $boost;
+}

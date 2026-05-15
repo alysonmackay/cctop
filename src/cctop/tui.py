@@ -1,118 +1,97 @@
 from __future__ import annotations
 
-import curses
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
-from .models import Calculation
-from .render import format_float, format_seconds, single_report, status_line
+from rich.console import Group
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.reactive import reactive
+from textual.widgets import DataTable, Footer, Header, Input, Static
+
+from .models import Calculation, JobType, McscfState, NevptResult, Status
+from .scan import summarize_status
+
+STATUS_STYLE = {
+    Status.DONE: "bold green",
+    Status.FAILED: "bold red",
+    Status.SUSPICIOUS: "bold yellow",
+    Status.RUNNING: "bold cyan",
+    Status.UNKNOWN: "dim",
+}
+
+STATUS_GLYPH = {
+    Status.DONE: "●",
+    Status.FAILED: "✗",
+    Status.SUSPICIOUS: "⚠",
+    Status.RUNNING: "…",
+    Status.UNKNOWN: "?",
+}
+
+SORT_KEYS = ("file", "status", "energy", "runtime")
+FILTER_CYCLE: tuple[Status | None, ...] = (
+    None,
+    Status.DONE,
+    Status.FAILED,
+    Status.SUSPICIOUS,
+    Status.RUNNING,
+    Status.UNKNOWN,
+)
 
 
 def run_tui(calculations: list[Calculation], root: Path | None = None) -> None:
-    curses.wrapper(_main, calculations, root)
+    CctopApp(calculations, root).run()
 
 
-def _main(stdscr: curses.window, calculations: list[Calculation], root: Path | None) -> None:
-    curses.curs_set(0)
-    stdscr.keypad(True)
-    selected = 0
-    offset = 0
-
-    while True:
-        height, width = stdscr.getmaxyx()
-        stdscr.erase()
-        _draw(stdscr, calculations, root, selected, offset, height, width)
-        key = stdscr.getch()
-
-        if key in (ord("q"), 27):
-            break
-        if key in (curses.KEY_DOWN, ord("j")) and selected < len(calculations) - 1:
-            selected += 1
-        elif key in (curses.KEY_UP, ord("k")) and selected > 0:
-            selected -= 1
-        elif key == curses.KEY_NPAGE:
-            selected = min(len(calculations) - 1, selected + max(1, height - 6))
-        elif key == curses.KEY_PPAGE:
-            selected = max(0, selected - max(1, height - 6))
-
-        table_height = max(1, height - 8)
-        if selected < offset:
-            offset = selected
-        elif selected >= offset + table_height:
-            offset = selected - table_height + 1
+@dataclass
+class Row:
+    calc: Calculation
+    key: str
 
 
-def _draw(
-    stdscr: curses.window,
-    calculations: list[Calculation],
-    root: Path | None,
-    selected: int,
-    offset: int,
-    height: int,
-    width: int,
-) -> None:
-    if height < 10 or width < 70:
-        _addstr(stdscr, 0, 0, "cctop needs a larger terminal. Press q to quit.", width)
-        return
-
-    _addstr(stdscr, 0, 0, f"cctop | {status_line(calculations)}", width, curses.A_BOLD)
-    _addstr(stdscr, 1, 0, "Use j/k or arrow keys to move. q quits.", width)
-
-    split = max(44, width // 2)
-    _draw_table(stdscr, calculations, root, selected, offset, 3, split - 1, height - 4)
-    _draw_details(stdscr, calculations[selected] if calculations else None, root, 3, split + 1, width - split - 2, height - 4)
-    stdscr.refresh()
+def status_pill(status: Status) -> Text:
+    return Text(f"{STATUS_GLYPH[status]} {status.value}", style=STATUS_STYLE[status])
 
 
-def _draw_table(
-    stdscr: curses.window,
-    calculations: list[Calculation],
-    root: Path | None,
-    selected: int,
-    offset: int,
-    y: int,
-    width: int,
-    height: int,
-) -> None:
-    _addstr(stdscr, y, 0, "Calculations", width, curses.A_BOLD)
-    _addstr(stdscr, y + 1, 0, f"{'Status':<11} {'File':<24} {'Energy':>12} {'Im':>3}", width)
-    visible = calculations[offset : offset + max(0, height - 2)]
-
-    for index, calc in enumerate(visible, start=offset):
-        line_y = y + 2 + index - offset
-        path = _display_path(calc, root)
-        line = (
-            f"{calc.status.value:<11} "
-            f"{path:<24.24} "
-            f"{format_float(calc.final_energy):>12} "
-            f"{_none_dash(calc.imaginary_frequency_count):>3}"
-        )
-        attr = curses.A_REVERSE if index == selected else curses.A_NORMAL
-        _addstr(stdscr, line_y, 0, line, width, attr)
+def runtime_spark(seconds: int | None, ceiling: int) -> Text:
+    blocks = "▁▂▃▄▅▆▇█"
+    if seconds is None or seconds <= 0 or ceiling <= 0:
+        return Text("─" * 4, style="dim")
+    ratio = min(1.0, seconds / ceiling)
+    fill = max(1, int(ratio * 4))
+    glyph = blocks[min(len(blocks) - 1, int(ratio * (len(blocks) - 1)))]
+    bar = glyph * fill + " " * (4 - fill)
+    style = "green" if ratio < 0.4 else "yellow" if ratio < 0.8 else "red"
+    return Text(bar, style=style)
 
 
-def _draw_details(
-    stdscr: curses.window,
-    calc: Calculation | None,
-    root: Path | None,
-    y: int,
-    x: int,
-    width: int,
-    height: int,
-) -> None:
-    _addstr(stdscr, y, x, "Details", width, curses.A_BOLD)
-    if calc is None:
-        _addstr(stdscr, y + 1, x, "No calculations found.", width)
-        return
-
-    report_lines = single_report(calc, root=root).splitlines()
-    report_lines.append("")
-    report_lines.append(f"Runtime: {format_seconds(calc.runtime_seconds)}")
-
-    for index, line in enumerate(report_lines[: max(0, height - 1)], start=1):
-        _addstr(stdscr, y + index, x, line, width)
+def fmt_energy(value: float | None) -> Text:
+    if value is None:
+        return Text("--", style="dim")
+    return Text(f"{value:.6f}", style="bright_white")
 
 
-def _display_path(calc: Calculation, root: Path | None) -> str:
+def fmt_runtime(value: int | None) -> str:
+    if value is None:
+        return "--"
+    h, rem = divmod(value, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def fmt_imag(count: int | None) -> Text:
+    if count is None or count == 0:
+        return Text("--" if count is None else "0", style="dim" if count is None else "green")
+    return Text(str(count), style="bold red")
+
+
+def display_path(calc: Calculation, root: Path | None) -> str:
     if root is None:
         return str(calc.path.name)
     try:
@@ -121,14 +100,354 @@ def _display_path(calc: Calculation, root: Path | None) -> str:
         return str(calc.path.name)
 
 
-def _none_dash(value: object | None) -> str:
-    return "--" if value is None else str(value)
+def details_renderable(calc: Calculation, root: Path | None) -> Group:
+    path = display_path(calc, root)
+
+    summary = Table.grid(padding=(0, 2), expand=True)
+    summary.add_column(style="dim", no_wrap=True, ratio=1)
+    summary.add_column(ratio=2)
+
+    rows: list[tuple[str, Text | str]] = [
+        ("Status", status_pill(calc.status)),
+        ("Program", Text(calc.program or "--", style="cyan")),
+        ("Version", calc.version or _dash()),
+        ("Job type", Text(calc.job_type.value, style="bold magenta")),
+        ("Method", calc.method or _dash()),
+        ("Basis", calc.basis or _dash()),
+        ("Charge / Mult", _charge_mult(calc)),
+        ("Final energy", _energy_line(calc.final_energy)),
+        ("Gibbs energy", _energy_line(calc.gibbs_energy)),
+        ("Imag. freqs", fmt_imag(calc.imaginary_frequency_count)),
+        ("Lowest freq", _freq_line(calc.lowest_frequency)),
+        ("Runtime", Text(fmt_runtime(calc.runtime_seconds), style="bright_white")),
+        ("Resources", _resources(calc)),
+        ("Termination", calc.termination or _dash()),
+        ("Warnings", _warning_count(calc.warning_count)),
+    ]
+    for label, value in rows:
+        summary.add_row(label, value)
+
+    parts: list = [
+        Panel(
+            summary,
+            title=Text(path, style="bold"),
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    ]
+
+    if calc.warnings:
+        wtable = Table.grid(padding=(0, 1))
+        wtable.add_column(style="bold yellow", no_wrap=True)
+        wtable.add_column()
+        for w in calc.warnings:
+            wtable.add_row(w.code, w.message)
+        parts.append(Panel(wtable, title="Warning markers", border_style="yellow", padding=(0, 1)))
+
+    if calc.casscf_final_energy is not None or calc.casscf_states:
+        parts.append(_mcscf_panel("CASSCF", calc.casscf_states, calc.casscf_final_energy))
+    if calc.mrci_states:
+        parts.append(_mcscf_panel("MRCI", calc.mrci_states, None))
+    if calc.nevpt2_results:
+        parts.append(_nevpt_panel(calc.nevpt2_results))
+
+    return Group(*parts)
 
 
-def _addstr(stdscr: curses.window, y: int, x: int, text: str, width: int, attr: int = curses.A_NORMAL) -> None:
-    if width <= 0:
-        return
-    try:
-        stdscr.addstr(y, x, text[: max(0, width - 1)], attr)
-    except curses.error:
-        pass
+def _mcscf_panel(title: str, states: list[McscfState], final_energy: float | None) -> Panel:
+    body = Table.grid(padding=(0, 1))
+    body.add_column()
+    if final_energy is not None:
+        body.add_row(Text(f"Final/averaged energy: {final_energy:.8f} Eh", style="bright_white"))
+        body.add_row(Rule(style="dim"))
+    for i, state in enumerate(states):
+        if i > 0:
+            body.add_row(Rule(style="dim"))
+        body.add_row(Text(_state_label(state), style="bold magenta"))
+        for w in state.weights:
+            body.add_row(Text(f"  {w.weight:7.4f}  {w.occupation}", style="dim"))
+    return Panel(body, title=title, border_style="magenta", padding=(0, 1))
+
+
+def _nevpt_panel(results: list[NevptResult]) -> Panel:
+    body = Table.grid(padding=(0, 1))
+    body.add_column()
+    for i, r in enumerate(results):
+        if i > 0:
+            body.add_row(Rule(style="dim"))
+        label = f"Root {r.root}" + (f", mult {r.multiplicity}" if r.multiplicity is not None else "")
+        body.add_row(Text(label, style="bold magenta"))
+        body.add_row(Text(f"  Reference E0  : {r.reference_energy:.8f} Eh"))
+        body.add_row(Text(f"  Correction dE : {r.correction:.8f} Eh"))
+        body.add_row(Text(f"  Total         : {r.total_energy:.8f} Eh", style="bright_white"))
+    return Panel(body, title="NEVPT2", border_style="magenta", padding=(0, 1))
+
+
+def _state_label(state: McscfState) -> str:
+    parts = [f"Root {state.root}"]
+    if state.block is not None:
+        parts.append(f"block {state.block}")
+    if state.multiplicity is not None:
+        parts.append(f"mult {state.multiplicity}")
+    label = ", ".join(parts)
+    extras = [f"E = {state.energy:.8f} Eh"]
+    if state.reference_weight is not None:
+        extras.append(f"W(ref) = {state.reference_weight:.4f}")
+    return f"{label}: " + ", ".join(extras)
+
+
+def _dash() -> Text:
+    return Text("--", style="dim")
+
+
+def _charge_mult(calc: Calculation) -> Text:
+    if calc.charge is None or calc.multiplicity is None:
+        return _dash()
+    return Text(f"{calc.charge} / {calc.multiplicity}")
+
+
+def _energy_line(value: float | None) -> Text:
+    if value is None:
+        return _dash()
+    return Text(f"{value:.8f} Eh", style="bright_white")
+
+
+def _freq_line(value: float | None) -> Text:
+    if value is None:
+        return _dash()
+    style = "red" if value < 0 else "white"
+    return Text(f"{value:.2f} cm⁻¹", style=style)
+
+
+def _resources(calc: Calculation) -> Text:
+    if calc.nprocs is None and calc.maxcore_mb is None:
+        return _dash()
+    nprocs = str(calc.nprocs) if calc.nprocs is not None else "?"
+    mem = f"{calc.maxcore_mb} MB" if calc.maxcore_mb is not None else "? MB"
+    return Text(f"{nprocs} proc · {mem}/proc")
+
+
+def _warning_count(count: int) -> Text:
+    if count == 0:
+        return Text("0", style="green")
+    return Text(str(count), style="bold yellow")
+
+
+def _summary_renderable(calculations: list[Calculation]) -> Text:
+    counts = summarize_status(calculations)
+    total = len(calculations)
+    text = Text()
+    text.append(f"{total} calculations  ", style="bold")
+    pieces = [
+        (Status.DONE, "done"),
+        (Status.FAILED, "failed"),
+        (Status.SUSPICIOUS, "suspicious"),
+        (Status.RUNNING, "running"),
+        (Status.UNKNOWN, "unknown"),
+    ]
+    for i, (status, label) in enumerate(pieces):
+        if i > 0:
+            text.append("  ·  ", style="dim")
+        text.append(f"{counts[status]} ", style=STATUS_STYLE[status])
+        text.append(label, style="dim")
+    return text
+
+
+class CctopApp(App):
+    CSS_PATH = "cctop.tcss"
+    TITLE = "cctop"
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("escape", "clear_search", "Clear", show=False),
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+        Binding("g", "cursor_home", "Top", show=False),
+        Binding("G", "cursor_end", "Bottom", show=False),
+        Binding("slash", "focus_search", "Search"),
+        Binding("s", "cycle_sort", "Sort"),
+        Binding("f", "cycle_filter", "Filter"),
+        Binding("r", "refresh_view", "Refresh"),
+    ]
+
+    sort_key: reactive[str] = reactive("file")
+    status_filter: reactive[Status | None] = reactive(None)
+    search_query: reactive[str] = reactive("")
+
+    def __init__(self, calculations: list[Calculation], root: Path | None) -> None:
+        super().__init__()
+        self._all = calculations
+        self._root = root
+        self._rows: list[Row] = []
+        max_runtime = max(
+            (c.runtime_seconds for c in calculations if c.runtime_seconds is not None),
+            default=0,
+        )
+        self._runtime_ceiling = max(max_runtime, 1)
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        yield Static(_summary_renderable(self._all), id="summary")
+        with Horizontal(id="body"):
+            with Vertical(id="left"):
+                yield Input(placeholder="Search filename… (esc to clear)", id="search")
+                yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
+            with VerticalScroll(id="right"):
+                yield Static(id="details", expand=True)
+        yield Static(id="statusbar")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        table = self.query_one("#table", DataTable)
+        table.add_column("Status", key="status", width=14)
+        table.add_column("File", key="file")
+        table.add_column("Job", key="job", width=7)
+        table.add_column("Method", key="method", width=14)
+        table.add_column("Energy (Eh)", key="energy", width=14)
+        table.add_column("Imag", key="imag", width=5)
+        table.add_column("Runtime", key="runtime", width=10)
+        table.add_column("⏱", key="spark", width=5)
+        table.add_column("Warn", key="warn", width=5)
+        self._populate()
+        self.query_one("#search", Input).display = False
+        self._refresh_status_bar()
+        table.focus()
+
+    # ---- data ----
+
+    def _filtered_sorted(self) -> list[Calculation]:
+        items = list(self._all)
+        if self.status_filter is not None:
+            items = [c for c in items if c.status == self.status_filter]
+        q = self.search_query.strip().lower()
+        if q:
+            items = [c for c in items if q in str(c.path).lower()]
+        items.sort(key=self._sort_func(self.sort_key))
+        return items
+
+    def _sort_func(self, key: str):
+        if key == "status":
+            order = {s: i for i, s in enumerate(
+                [Status.FAILED, Status.SUSPICIOUS, Status.RUNNING, Status.DONE, Status.UNKNOWN]
+            )}
+            return lambda c: (order.get(c.status, 99), str(c.path))
+        if key == "energy":
+            return lambda c: (c.final_energy is None, c.final_energy if c.final_energy is not None else 0.0)
+        if key == "runtime":
+            return lambda c: (c.runtime_seconds is None, -(c.runtime_seconds or 0))
+        return lambda c: str(c.path).lower()
+
+    def _populate(self) -> None:
+        table = self.query_one("#table", DataTable)
+        table.clear()
+        self._rows = []
+        for idx, calc in enumerate(self._filtered_sorted()):
+            key = f"row-{idx}"
+            table.add_row(
+                status_pill(calc.status),
+                Text(display_path(calc, self._root), overflow="ellipsis", no_wrap=True),
+                Text(calc.job_type.value, style="magenta"),
+                Text(calc.method or "--", style="dim" if calc.method is None else ""),
+                fmt_energy(calc.final_energy),
+                fmt_imag(calc.imaginary_frequency_count),
+                Text(fmt_runtime(calc.runtime_seconds)),
+                runtime_spark(calc.runtime_seconds, self._runtime_ceiling),
+                _warning_count(calc.warning_count),
+                key=key,
+            )
+            self._rows.append(Row(calc=calc, key=key))
+        if self._rows:
+            table.move_cursor(row=0)
+            self._update_details(self._rows[0].calc)
+        else:
+            self._update_details(None)
+
+    def _update_details(self, calc: Calculation | None) -> None:
+        details = self.query_one("#details", Static)
+        if calc is None:
+            details.update(Text("No calculations match the current filter.", style="dim"))
+        else:
+            details.update(details_renderable(calc, self._root))
+
+    def _refresh_status_bar(self) -> None:
+        text = Text()
+        text.append("sort: ", style="dim")
+        text.append(self.sort_key, style="bold cyan")
+        text.append("   filter: ", style="dim")
+        text.append(
+            self.status_filter.value if self.status_filter else "all",
+            style=STATUS_STYLE.get(self.status_filter, "bold") if self.status_filter else "bold",
+        )
+        if self.search_query:
+            text.append("   search: ", style="dim")
+            text.append(f"“{self.search_query}”", style="italic")
+        text.append(f"   {len(self._rows)}/{len(self._all)} shown", style="dim")
+        self.query_one("#statusbar", Static).update(text)
+
+    # ---- events ----
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        for row in self._rows:
+            if row.key == event.row_key.value:
+                self._update_details(row.calc)
+                return
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "search":
+            self.search_query = event.value
+            self._populate()
+            self._refresh_status_bar()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "search":
+            self.query_one("#table", DataTable).focus()
+
+    # ---- actions ----
+
+    def action_focus_search(self) -> None:
+        search = self.query_one("#search", Input)
+        search.display = True
+        search.focus()
+
+    def action_clear_search(self) -> None:
+        search = self.query_one("#search", Input)
+        if search.has_focus or search.value:
+            search.value = ""
+            search.display = False
+            self.search_query = ""
+            self._populate()
+            self._refresh_status_bar()
+            self.query_one("#table", DataTable).focus()
+
+    def action_cursor_down(self) -> None:
+        self.query_one("#table", DataTable).action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        self.query_one("#table", DataTable).action_cursor_up()
+
+    def action_cursor_home(self) -> None:
+        table = self.query_one("#table", DataTable)
+        if self._rows:
+            table.move_cursor(row=0)
+
+    def action_cursor_end(self) -> None:
+        table = self.query_one("#table", DataTable)
+        if self._rows:
+            table.move_cursor(row=len(self._rows) - 1)
+
+    def action_cycle_sort(self) -> None:
+        idx = SORT_KEYS.index(self.sort_key)
+        self.sort_key = SORT_KEYS[(idx + 1) % len(SORT_KEYS)]
+        self._populate()
+        self._refresh_status_bar()
+
+    def action_cycle_filter(self) -> None:
+        idx = FILTER_CYCLE.index(self.status_filter)
+        self.status_filter = FILTER_CYCLE[(idx + 1) % len(FILTER_CYCLE)]
+        self._populate()
+        self._refresh_status_bar()
+
+    def action_refresh_view(self) -> None:
+        self.query_one("#summary", Static).update(_summary_renderable(self._all))
+        self._populate()
+        self._refresh_status_bar()
