@@ -156,6 +156,35 @@ METHOD_SKIP = {
     "useless",
 }
 
+# Canonical name -> alternate spellings (all lowercased, punctuation stripped
+# for comparison). Add entries here if a new functional starts showing up.
+DFT_FUNCTIONALS: dict[str, tuple[str, ...]] = {
+    "B3LYP": ("b3lyp", "b3lypg"),
+    "BP86": ("bp86", "bp"),
+    "M06-2X": ("m062x", "m06-2x", "m06,2x"),
+    "PBE": ("pbe",),
+    "PBE0": ("pbe0", "pbe1pbe"),
+    "BLYP": ("blyp",),
+    "TPSS": ("tpss",),
+    "TPSSh": ("tpssh",),
+    "M06": ("m06",),
+    "M06-L": ("m06l", "m06-l"),
+    "ωB97X-D3": ("wb97x-d3", "wb97xd3"),
+    "ωB97X-D4": ("wb97x-d4", "wb97xd4"),
+    "CAM-B3LYP": ("cam-b3lyp", "camb3lyp"),
+    "B97-D3": ("b97-d3", "b97d3"),
+    "r²SCAN-3c": ("r2scan-3c", "r2scan3c"),
+}
+
+_FUNCTIONAL_LOOKUP: dict[str, str] = {
+    alias: canonical for canonical, aliases in DFT_FUNCTIONALS.items() for alias in aliases
+}
+
+
+def _normalize_functional_token(token: str) -> str:
+    return token.lower().replace("/", "")
+
+
 def _strip_echo_prefix(line: str) -> str:
     return re.sub(r"^\|\s*\d+>\s*", "", line).strip()
 
@@ -255,6 +284,14 @@ def _parse_method_basis(command_line: str) -> tuple[str | None, str | None]:
     tokens = [token.strip() for token in cleaned.split() if token.strip()]
     method = None
     basis = None
+
+    # First pass: prefer a recognized DFT functional, normalized to canonical form.
+    # This wins over any other non-skip token so AutoAux-style noise can't sneak in.
+    for token in tokens:
+        canonical = _FUNCTIONAL_LOOKUP.get(_normalize_functional_token(token))
+        if canonical is not None:
+            method = canonical
+            break
 
     for token in tokens:
         lowered = token.lower()

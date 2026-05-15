@@ -385,6 +385,54 @@ class OrcaParserTest(unittest.TestCase):
         self.assertEqual(state.weights[3].occupation, "h---h 99[21]")
         self.assertAlmostEqual(state.weights[1].weight, 0.8478)
 
+    def test_recognizes_common_dft_functionals(self) -> None:
+        template = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+|  1> ! {keywords}
+* xyz 0 1
+H 0 0 0
+H 0 0 1
+*
+
+FINAL SINGLE POINT ENERGY     -1.123
+TOTAL RUN TIME: 0 days 0 hours 0 minutes 1 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+        cases = [
+            ("RIJCOSX B3LYP def2-SVP D3BJ", "B3LYP"),
+            ("BP86 def2-TZVP", "BP86"),
+            ("M062X def2-TZVP", "M06-2X"),
+            ("M06-2X def2-TZVP", "M06-2X"),
+            ("def2-SVP TightSCF PBE0", "PBE0"),
+        ]
+        for keywords, expected in cases:
+            with self.subTest(keywords=keywords):
+                calc = self._parse(template.format(keywords=keywords))
+                self.assertEqual(calc.method, expected)
+
+    def test_unknown_functional_falls_back_to_first_token(self) -> None:
+        # Non-allowlist token still gets through the existing fallback path.
+        sample = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+|  1> ! CCSD(T) def2-TZVP
+* xyz 0 1
+H 0 0 0
+H 0 0 1
+*
+
+FINAL SINGLE POINT ENERGY     -1.123
+TOTAL RUN TIME: 0 days 0 hours 0 minutes 1 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+        calc = self._parse(sample)
+        self.assertEqual(calc.method, "CCSD(T)")
+
     def test_autoaux_not_treated_as_method(self) -> None:
         sample = """
 O   R   C   A
