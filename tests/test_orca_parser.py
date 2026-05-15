@@ -385,6 +385,154 @@ class OrcaParserTest(unittest.TestCase):
         self.assertEqual(state.weights[3].occupation, "h---h 99[21]")
         self.assertAlmostEqual(state.weights[1].weight, 0.8478)
 
+    def test_autoaux_not_treated_as_method(self) -> None:
+        sample = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+|  1> ! def2-TZVP AutoAux MORead PAtom RIJK conv
+|  2> %casscf nel 2 norb 2 mult 1 nroots 1 end
+* xyz 0 1
+H 0 0 0
+H 0 0 1
+*
+
+FINAL SINGLE POINT ENERGY     -1.123
+TOTAL RUN TIME: 0 days 0 hours 0 minutes 1 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+        calc = self._parse(sample)
+        self.assertEqual(calc.basis, "def2-TZVP")
+        # AutoAux must not leak as a method; %casscf block promotes to CASSCF.
+        self.assertEqual(calc.method, "CASSCF")
+
+    def test_allowrhf_does_not_override_post_hf_method(self) -> None:
+        sample = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+|  1> ! RHF AllowRHF def2-TZVP AutoAux MORead
+|  2> %casscf nel 2 norb 2 mult 1 nroots 1 end
+* xyz 0 1
+H 0 0 0
+H 0 0 1
+*
+
+FINAL SINGLE POINT ENERGY     -1.123
+TOTAL RUN TIME: 0 days 0 hours 0 minutes 1 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+        calc = self._parse(sample)
+        self.assertEqual(calc.method, "CASSCF")
+
+    def test_mrci_tags_initial_and_final_states(self) -> None:
+        sample = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+! MRCI def2-SVP
+%mrci end
+* xyz 0 1
+H 0 0 0
+H 0 0 1
+*
+
+------------------
+REFERENCE SPACE CI
+------------------
+
+----------
+CI-RESULTS
+----------
+
+STATE   0:  Energy=  -2803.089012464 Eh RefWeight=  1.0000  0.00 eV      0.0 cm**-1
+      0.9884  : h---h---[11]
+
+------------------------------
+MR-PT SELECTION TSel= 1.00e-08
+------------------------------
+
+----------
+CI-RESULTS
+----------
+
+STATE   0:  Energy=  -2803.351419334 Eh RefWeight=  0.8871  0.00 eV      0.0 cm**-1
+      0.8478  : h---h---[11]
+
+FINAL SINGLE POINT ENERGY     -2803.351419333726
+TOTAL RUN TIME: 0 days 0 hours 1 minutes 0 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+        calc = self._parse(sample)
+        kinds = [s.kind for s in calc.mrci_states]
+        self.assertEqual(kinds, ["reference", "final"])
+        ref = calc.mrci_states[0]
+        fin = calc.mrci_states[1]
+        self.assertAlmostEqual(ref.reference_weight or 0.0, 1.0)
+        self.assertAlmostEqual(fin.reference_weight or 0.0, 0.8871)
+
+    def test_localized_orbitals_and_active_occupations(self) -> None:
+        sample = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+! CASSCF def2-TZVP
+%casscf nel 2 norb 2 mult 1 nroots 1 actorbs locorbs end
+* xyz 0 1
+H 0 0 0
+H 0 0 1
+*
+
+   --- Localizing Subspace 114-115
+
+------------------------------------------------------------------------------
+                           ORCA ORBITAL LOCALIZATION
+------------------------------------------------------------------------------
+
+Orbital range for localization           ... 114 to 115
+
+   N(occ)=  1.10516 0.89484
+   N(occ)=  0.99969 1.00031
+
+--------------------------------------------------------------------------------
+                    LOCALIZED MOLECULAR ORBITAL COMPOSITIONS
+--------------------------------------------------------------------------------
+
+FOUND  -   0 strongly local MO`s
+       -   1 two center bond MO`s
+       -   1 significantly delocalized MO`s
+
+Bond-like localized orbitals:
+MO 114:  20Cu -   0.940993  and   5N  -   0.012514
+More delocalized orbitals:
+MO 115:  21O - 0.112 31N - 0.228 33C - 0.405 34H - 0.117
+Localized MO's were stored in: /tmp/orbs.gbw
+
+FINAL SINGLE POINT ENERGY     -1.123
+TOTAL RUN TIME: 0 days 0 hours 1 minutes 0 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+        calc = self._parse(sample)
+        loc = calc.localized_orbitals
+        self.assertIsNotNone(loc)
+        assert loc is not None  # for type narrowing
+        self.assertEqual(loc.active_range, (114, 115))
+        self.assertEqual(loc.bond_count, 1)
+        self.assertEqual(loc.delocalized_count, 1)
+        self.assertEqual(len(loc.bonds), 1)
+        self.assertEqual(loc.bonds[0].mo, 114)
+        self.assertEqual(len(loc.delocalized), 1)
+        self.assertEqual(loc.delocalized[0].mo, 115)
+
+        occs = calc.active_occupations
+        self.assertEqual([o.mo for o in occs], [114, 115])
+        self.assertAlmostEqual(occs[0].occupation, 0.99969)
+        self.assertAlmostEqual(occs[1].occupation, 1.00031)
+
     def test_uses_latest_frequency_block(self) -> None:
         calc = self._parse(ORCA_TS_WITH_MULTIPLE_FREQUENCY_BLOCKS)
         self.assertEqual(calc.status, Status.SUSPICIOUS)

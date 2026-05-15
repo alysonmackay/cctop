@@ -15,7 +15,15 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Input, Static
 
-from .models import Calculation, JobType, McscfState, NevptResult, Status
+from .models import (
+    ActiveOccupation,
+    Calculation,
+    JobType,
+    LocalizedOrbitals,
+    McscfState,
+    NevptResult,
+    Status,
+)
 from .scan import summarize_status
 
 STATUS_STYLE = {
@@ -147,16 +155,39 @@ def details_renderable(calc: Calculation, root: Path | None) -> Group:
     if calc.casscf_final_energy is not None or calc.casscf_states:
         parts.append(_mcscf_panel("CASSCF", calc.casscf_states, calc.casscf_final_energy))
     if calc.mrci_states:
-        parts.append(_mcscf_panel("MRCI", calc.mrci_states, None))
+        initial = [s for s in calc.mrci_states if s.kind == "reference"]
+        final = [s for s in calc.mrci_states if s.kind != "reference"]
+        if initial:
+            parts.append(_mcscf_panel(
+                "MRCI · initial (reference-space CI)",
+                initial,
+                None,
+                subtitle="weights from the reference-space diagonalization before MR-PT selection",
+            ))
+        if final:
+            parts.append(_mcscf_panel("MRCI · final (after MR-PT selection)", final, None))
     if calc.nevpt2_results:
         parts.append(_nevpt_panel(calc.nevpt2_results))
+    if calc.localized_orbitals:
+        parts.append(_localized_panel(calc.localized_orbitals))
+    if calc.active_occupations:
+        parts.append(_active_occ_panel(calc.active_occupations))
 
     return Group(*parts)
 
 
-def _mcscf_panel(title: str, states: list[McscfState], final_energy: float | None) -> Panel:
+def _mcscf_panel(
+    title: str,
+    states: list[McscfState],
+    final_energy: float | None,
+    *,
+    subtitle: str | None = None,
+) -> Panel:
     body = Table.grid(padding=(0, 1))
     body.add_column()
+    if subtitle:
+        body.add_row(Text(subtitle, style="dim italic"))
+        body.add_row(Rule(style="dim"))
     if final_energy is not None:
         body.add_row(Text(f"Final/averaged energy: {final_energy:.8f} Eh", style="bright_white"))
         body.add_row(Rule(style="dim"))
@@ -167,6 +198,77 @@ def _mcscf_panel(title: str, states: list[McscfState], final_energy: float | Non
         for w in state.weights:
             body.add_row(Text(f"  {w.weight:7.4f}  {w.occupation}", style="dim"))
     return Panel(body, title=title, border_style="magenta", padding=(0, 1))
+
+
+def _localized_panel(loc: LocalizedOrbitals) -> Panel:
+    body = Table.grid(padding=(0, 1))
+    body.add_column()
+
+    header_bits = Text()
+    if loc.active_range is not None:
+        a, b = loc.active_range
+        header_bits.append("Active range: ", style="dim")
+        header_bits.append(f"MO {a}–{b}", style="bold cyan")
+        header_bits.append("    ")
+    header_bits.append(f"{loc.strongly_local_count} strongly local", style="green")
+    header_bits.append("  ·  ", style="dim")
+    header_bits.append(f"{loc.bond_count} two-center bond", style="cyan")
+    header_bits.append("  ·  ", style="dim")
+    header_bits.append(f"{loc.delocalized_count} delocalized", style="yellow")
+    body.add_row(header_bits)
+
+    sections: list[tuple[str, list]] = [
+        ("Strongly localized", loc.strongly_local),
+        ("Bond-like", loc.bonds),
+        ("Delocalized", loc.delocalized),
+    ]
+    first = True
+    for label, items in sections:
+        if not items:
+            continue
+        if not first:
+            body.add_row(Text(""))
+        first = False
+        body.add_row(Text(label, style="bold cyan"))
+        for orb in items:
+            line = Text()
+            line.append(f"  MO {orb.mo}: ", style="bold")
+            line.append(orb.composition, style="white")
+            body.add_row(line)
+
+    return Panel(body, title="Localized orbitals", border_style="cyan", padding=(0, 1))
+
+
+def _active_occ_panel(occs: list[ActiveOccupation]) -> Panel:
+    body = Table.grid(padding=(0, 2))
+    body.add_column(style="dim", no_wrap=True)
+    body.add_column()
+    body.add_column()
+    body.add_row(Text("MO", style="bold dim"), Text("Occupation", style="bold dim"), Text("Bar", style="bold dim"))
+    for o in occs:
+        bar = _occ_bar(o.occupation)
+        body.add_row(str(o.mo), Text(f"{o.occupation:.4f}", style="bright_white"), bar)
+    return Panel(
+        body,
+        title="Active-space natural occupations",
+        subtitle="(2 = doubly occupied · 0 = empty)",
+        border_style="green",
+        padding=(0, 1),
+    )
+
+
+def _occ_bar(value: float) -> Text:
+    """Render a 0–2 occupation as a 10-cell bar (one cell = 0.2 electrons)."""
+    cells = 10
+    filled = max(0, min(cells, round(value / 2.0 * cells)))
+    bar = "█" * filled + "░" * (cells - filled)
+    if value > 1.6:
+        style = "green"
+    elif value > 0.4:
+        style = "yellow"
+    else:
+        style = "dim"
+    return Text(bar, style=style)
 
 
 def _nevpt_panel(results: list[NevptResult]) -> Panel:

@@ -43,6 +43,30 @@ class McscfState:
     block: int | None = None
     reference_weight: float | None = None
     weights: list[ConfigWeight] = field(default_factory=list)
+    kind: str | None = None  # "reference" (initial) or "final" for MRCI
+
+
+@dataclass(slots=True)
+class LocalizedOrbital:
+    mo: int
+    composition: str
+
+
+@dataclass(slots=True)
+class LocalizedOrbitals:
+    active_range: tuple[int, int] | None = None
+    strongly_local_count: int = 0
+    bond_count: int = 0
+    delocalized_count: int = 0
+    strongly_local: list[LocalizedOrbital] = field(default_factory=list)
+    bonds: list[LocalizedOrbital] = field(default_factory=list)
+    delocalized: list[LocalizedOrbital] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ActiveOccupation:
+    mo: int
+    occupation: float
 
 
 @dataclass(slots=True)
@@ -78,6 +102,8 @@ class Calculation:
     casscf_states: list[McscfState] = field(default_factory=list)
     mrci_states: list[McscfState] = field(default_factory=list)
     nevpt2_results: list[NevptResult] = field(default_factory=list)
+    localized_orbitals: LocalizedOrbitals | None = None
+    active_occupations: list[ActiveOccupation] = field(default_factory=list)
 
     @property
     def warning_count(self) -> int:
@@ -89,7 +115,14 @@ class Calculation:
         record["status"] = self.status.value
         record["warnings"] = [asdict(warning) for warning in self.warnings]
         record["warning_count"] = self.warning_count
-        for key in ("casscf_final_energy", "casscf_states", "mrci_states", "nevpt2_results"):
+        for key in (
+            "casscf_final_energy",
+            "casscf_states",
+            "mrci_states",
+            "nevpt2_results",
+            "localized_orbitals",
+            "active_occupations",
+        ):
             record.pop(key, None)
         return record
 

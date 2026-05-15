@@ -6,9 +6,12 @@ import time
 from pathlib import Path
 
 from .models import (
+    ActiveOccupation,
     Calculation,
     ConfigWeight,
     JobType,
+    LocalizedOrbital,
+    LocalizedOrbitals,
     McscfState,
     NevptResult,
     Status,
@@ -58,27 +61,99 @@ BASIS_HINTS = (
 )
 
 METHOD_SKIP = {
+    # job/runtime keywords
     "opt",
+    "optts",
     "freq",
+    "numfreq",
+    "anfreq",
     "engrad",
+    "sp",
+    # SCF convergence + grid keywords
     "tightscf",
+    "verytightscf",
     "veryslowscf",
     "slowscf",
+    "normalscf",
+    "looseopt",
+    "tightopt",
+    "easyconv",
+    "normalconv",
+    "tightconv",
+    "verytightconv",
+    "sloweconv",
+    "slowconv",
     "normalprint",
     "largeprint",
-    "rijcosx",
+    "miniprint",
+    "printbasis",
+    "printgap",
+    "printmos",
+    "nopop",
+    "anlyt",
+    "numerical",
+    "kdiis",
+    "soscf",
+    "nososcf",
+    "uno",
+    "noiter",
+    "allowrhf",
+    "allowuhf",
+    "noopt",
+    # RI / auxiliary basis fitting flags (not methods)
     "ri",
-    "d3",
-    "d3bj",
-    "d4",
+    "rijk",
+    "rij",
+    "ri-jk",
+    "ri-j",
+    "rijcosx",
+    "ricc2",
+    "autoaux",
+    # initial guess / MO control
+    "moread",
+    "patom",
+    "hueckel",
+    "pmodel",
+    "pmoread",
+    "bs",
+    "bsguess",
+    # PNO tiers
+    "tightpno",
+    "loosepno",
+    "normalpno",
+    # grid keywords
+    "grid3",
     "grid4",
     "grid5",
     "grid6",
+    "grid7",
+    "finalgrid3",
+    "finalgrid4",
     "finalgrid5",
     "finalgrid6",
-    "nososcf",
-    "miniprint",
-    "sp",
+    "defgrid1",
+    "defgrid2",
+    "defgrid3",
+    # dispersion
+    "d3",
+    "d3bj",
+    "d3zero",
+    "d4",
+    # parallelism / units
+    "pal",
+    "pal2",
+    "pal4",
+    "pal8",
+    "pal16",
+    "pal32",
+    "bohrs",
+    "angstrom",
+    # misc
+    "conv",
+    "noautostart",
+    "nofrozencore",
+    "frozencore",
+    "useless",
 }
 
 def _strip_echo_prefix(line: str) -> str:
@@ -127,6 +202,9 @@ def parse_orca(path: Path) -> Calculation:
     calc.casscf_states = _parse_casscf_states(lines)
     calc.mrci_states = _parse_mrci_states(lines)
     calc.nevpt2_results = _parse_nevpt2_results(lines)
+    calc.localized_orbitals = _parse_localized_orbitals(lines)
+    calc.active_occupations = _parse_active_occupations(lines, calc.localized_orbitals)
+    calc.method = _refine_method(calc.method, lines)
 
     calc.warnings.extend(_collect_warnings(lines, frequencies))
     calc.status = _classify(calc, text)
@@ -435,8 +513,19 @@ def _parse_mrci_states(lines: list[str]) -> list[McscfState]:
     states: list[McscfState] = []
     current: McscfState | None = None
     in_ci_results = False
+    phase = "reference"  # flips to "final" once MR-PT SELECTION is seen
 
     for line in lines:
+        if "REFERENCE SPACE CI" in line:
+            phase = "reference"
+            in_ci_results = False
+            current = None
+            continue
+        if "MR-PT SELECTION" in line:
+            phase = "final"
+            in_ci_results = False
+            current = None
+            continue
         if "CI-RESULTS" in line:
             in_ci_results = True
             current = None
@@ -450,6 +539,7 @@ def _parse_mrci_states(lines: list[str]) -> list[McscfState]:
                 root=int(header.group(1)),
                 energy=float(header.group(2)),
                 reference_weight=float(header.group(3)),
+                kind=phase,
             )
             states.append(current)
             continue
@@ -464,7 +554,7 @@ def _parse_mrci_states(lines: list[str]) -> list[McscfState]:
             )
             continue
 
-        if line.strip().startswith(("DENSITY", "Storing", "Now choosing", "===", "---")):
+        if line.strip().startswith(("DENSITY", "Storing", "Now choosing", "===")):
             current = None
             in_ci_results = False
 
@@ -536,3 +626,172 @@ def _parse_nevpt2_results(lines: list[str]) -> list[NevptResult]:
 
     flush()
     return results
+
+
+LOC_RANGE_RE = re.compile(r"Orbital range for localization\s*\.+\s*(\d+)\s+to\s+(\d+)", re.I)
+LOC_FOUND_RE = re.compile(
+    r"FOUND\s*-\s*(\d+)\s+strongly local.*?-\s*(\d+)\s+two center bond.*?-\s*(\d+)\s+significantly delocalized",
+    re.I | re.S,
+)
+LOC_MO_LINE_RE = re.compile(r"^\s*MO\s+(\d+):\s*(.+?)\s*$")
+ACTIVE_ORBITALS_RE = re.compile(r"Active Orbitals\s*:\s*(\d+)\s*-\s*(\d+)", re.I)
+LOCALIZING_SUBSPACE_RE = re.compile(r"Localizing Subspace\s+(\d+)\s*-\s*(\d+)", re.I)
+NOCC_LINE_RE = re.compile(r"N\(occ\)\s*=\s*((?:\s*" + FLOAT_RE + r")+)")
+
+
+def _refine_method(current: str | None, lines: list[str]) -> str | None:
+    """Override an initial-guess token (RHF/UHF/None) with the actual high-level method.
+
+    A user-friendly method label for multi-reference jobs is the post-HF block
+    name, not the SCF starting guess. We promote based on detected ``%block``
+    keywords.
+    """
+    block_keywords: set[str] = set()
+    in_input = False
+    for line in lines:
+        stripped = _strip_echo_prefix(line)
+        if "INPUT FILE" in line:
+            in_input = True
+            continue
+        if in_input and stripped.startswith("****END OF INPUT"):
+            break
+        if stripped.startswith("%"):
+            token = stripped.lstrip("%").split()[0].lower() if stripped.lstrip("%").split() else ""
+            if token:
+                block_keywords.add(token)
+
+    cur = (current or "").lower()
+    is_scf_guess = cur in {"", "rhf", "uhf", "rohf", "rks", "uks", "hf", "ks"}
+
+    if "mrci" in block_keywords and (is_scf_guess or current is None):
+        return "MRCI"
+    if "nevpt2" in block_keywords:
+        # NEVPT2 always runs through CASSCF; the NEVPT2 label is the more useful one.
+        return current if (current and not is_scf_guess) else "NEVPT2"
+    if "casscf" in block_keywords and (is_scf_guess or current is None):
+        return "CASSCF"
+    if "tddft" in block_keywords and (is_scf_guess or current is None):
+        return "TDDFT"
+    return current
+
+
+def _parse_localized_orbitals(lines: list[str]) -> LocalizedOrbitals | None:
+    """Capture the LAST LOCALIZED MOLECULAR ORBITAL COMPOSITIONS block in the file.
+
+    Multiple macro-iterations may emit this block; the one printed after CASSCF
+    convergence (the final iteration) is the interesting one.
+    """
+    # First find all block start indices
+    starts = [i for i, line in enumerate(lines) if "LOCALIZED MOLECULAR ORBITAL COMPOSITIONS" in line]
+    if not starts:
+        return None
+    start = starts[-1]
+
+    # Find the most recent active range before the localization block
+    active_range = _find_active_range(lines, start)
+
+    result = LocalizedOrbitals(active_range=active_range)
+    section: str | None = None  # current sub-section within the block
+
+    # Pull "FOUND" counts (may span lines)
+    window = "\n".join(lines[start : start + 30])
+    found = LOC_FOUND_RE.search(window)
+    if found:
+        result.strongly_local_count = int(found.group(1))
+        result.bond_count = int(found.group(2))
+        result.delocalized_count = int(found.group(3))
+
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if lower.startswith("strongly local"):
+            section = "strong"
+            continue
+        if lower.startswith("bond-like"):
+            section = "bond"
+            continue
+        if lower.startswith("more delocalized"):
+            section = "deloc"
+            continue
+        if stripped.startswith("Localized MO's were stored"):
+            break
+        if stripped.startswith("--- Canonicalize") or stripped.startswith("MACRO-ITERATION"):
+            break
+        match = LOC_MO_LINE_RE.match(line)
+        if match and section is not None:
+            entry = LocalizedOrbital(mo=int(match.group(1)), composition=match.group(2).strip())
+            if section == "strong":
+                result.strongly_local.append(entry)
+            elif section == "bond":
+                result.bonds.append(entry)
+            elif section == "deloc":
+                result.delocalized.append(entry)
+
+    if (
+        result.active_range is None
+        and not result.bonds
+        and not result.strongly_local
+        and not result.delocalized
+    ):
+        return None
+    return result
+
+
+def _find_active_range(lines: list[str], before: int) -> tuple[int, int] | None:
+    # Search backwards from `before` for the most recent range hint.
+    for i in range(before, -1, -1):
+        match = LOCALIZING_SUBSPACE_RE.search(lines[i])
+        if match:
+            return int(match.group(1)), int(match.group(2))
+        match = LOC_RANGE_RE.search(lines[i])
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    # Fall back to MRCI "Active Orbitals : X - Y"
+    for line in lines:
+        match = ACTIVE_ORBITALS_RE.search(line)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
+def _parse_active_occupations(
+    lines: list[str], localized: LocalizedOrbitals | None
+) -> list[ActiveOccupation]:
+    """Extract natural-orbital-style occupations of the active space.
+
+    Uses the final ``N(occ)= ...`` line emitted by the CASSCF driver and maps
+    the values to MO indices using the active range.
+    """
+    last_values: list[float] | None = None
+    for line in lines:
+        match = NOCC_LINE_RE.search(line)
+        if match:
+            chunk = match.group(1).strip()
+            try:
+                last_values = [float(token) for token in chunk.split()]
+            except ValueError:
+                continue
+    if not last_values:
+        return []
+
+    active_range: tuple[int, int] | None = (
+        localized.active_range if localized and localized.active_range else None
+    )
+    if active_range is None:
+        for line in lines:
+            match = ACTIVE_ORBITALS_RE.search(line)
+            if match:
+                active_range = (int(match.group(1)), int(match.group(2)))
+                break
+
+    if active_range is not None:
+        start, end = active_range
+        mo_indices = list(range(start, end + 1))
+        if len(mo_indices) != len(last_values):
+            mo_indices = list(range(start, start + len(last_values)))
+    else:
+        mo_indices = list(range(1, len(last_values) + 1))
+
+    return [ActiveOccupation(mo=mo, occupation=occ) for mo, occ in zip(mo_indices, last_values)]
