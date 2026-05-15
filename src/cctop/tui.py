@@ -17,11 +17,13 @@ from textual.widgets import DataTable, Footer, Header, Input, Static
 
 from .models import (
     ActiveOccupation,
+    BrokenSymmetryCoupling,
     Calculation,
     JobType,
     LocalizedOrbitals,
     McscfState,
     NevptResult,
+    SaCasscfTransitions,
     Status,
 )
 from .scan import summarize_status
@@ -172,6 +174,10 @@ def details_renderable(calc: Calculation, root: Path | None) -> Group:
         parts.append(_localized_panel(calc.localized_orbitals))
     if calc.active_occupations:
         parts.append(_active_occ_panel(calc.active_occupations))
+    if calc.sa_casscf_transitions:
+        parts.append(_sa_transitions_panel(calc.sa_casscf_transitions))
+    if calc.bs_coupling:
+        parts.append(_bs_coupling_panel(calc.bs_coupling))
 
     return Group(*parts)
 
@@ -269,6 +275,99 @@ def _occ_bar(value: float) -> Text:
     else:
         style = "dim"
     return Text(bar, style=style)
+
+
+def _sa_transitions_panel(t: SaCasscfTransitions) -> Panel:
+    header = Text()
+    header.append("Lowest root: ", style="dim")
+    header.append(f"root {t.lowest_root}, mult {t.lowest_multiplicity}", style="bold cyan")
+    header.append(f"   E = {t.lowest_energy_eh:.6f} Eh", style="bright_white")
+
+    table = Table.grid(padding=(0, 2), expand=True)
+    table.add_column(style="dim", no_wrap=True)
+    table.add_column(no_wrap=True)
+    table.add_column(no_wrap=True)
+    table.add_column(no_wrap=True)
+    table.add_column(no_wrap=True)
+    table.add_row(
+        Text("State", style="bold dim"),
+        Text("Root", style="bold dim"),
+        Text("Mult", style="bold dim"),
+        Text("ΔE (Eh)", style="bold dim"),
+        Text("ΔE (cm⁻¹)", style="bold dim"),
+    )
+    for tr in t.transitions:
+        table.add_row(
+            str(tr.state_index),
+            str(tr.root),
+            str(tr.multiplicity),
+            Text(f"{tr.de_eh:.6f}", style="bright_white"),
+            Text(f"{tr.de_cm:,.1f}", style="bold green"),
+        )
+
+    body = Table.grid(padding=(0, 1))
+    body.add_column()
+    body.add_row(header)
+    body.add_row(Rule(style="dim"))
+    body.add_row(table)
+    return Panel(body, title="SA-CASSCF transition energies", border_style="green", padding=(0, 1))
+
+
+def _bs_coupling_panel(bs: BrokenSymmetryCoupling) -> Panel:
+    body = Table.grid(padding=(0, 1))
+    body.add_column()
+
+    # Headline: J(1) Noodleman + coupling type.
+    headline = Text()
+    if bs.j1_noodleman is not None:
+        headline.append("J(1) Noodleman: ", style="dim")
+        headline.append(f"{bs.j1_noodleman:+,.2f} cm⁻¹", style="bold green")
+    if bs.coupling_type:
+        if bs.j1_noodleman is not None:
+            headline.append("   ")
+        colour = "red" if bs.coupling_type == "antiferromagnetic" else "blue"
+        headline.append(bs.coupling_type.upper(), style=f"bold {colour}")
+    if headline.plain:
+        body.add_row(headline)
+        body.add_row(Rule(style="dim"))
+
+    # Spin / energy summary.
+    summary = Table.grid(padding=(0, 2), expand=True)
+    summary.add_column(style="dim", no_wrap=True, ratio=1)
+    summary.add_column(ratio=2)
+
+    def _row(label: str, value: float | None, fmt: str, style: str = "bright_white") -> None:
+        if value is None:
+            return
+        summary.add_row(label, Text(format(value, fmt), style=style))
+
+    _row("S (high-spin)", bs.s_high_spin, ".1f")
+    _row("⟨S²⟩ high-spin", bs.s2_high_spin, ".4f")
+    _row("⟨S²⟩ broken-sym", bs.s2_broken_sym, ".4f")
+    _row("E (high-spin)", bs.energy_high_spin, ".6f")
+    _row("E (broken-sym)", bs.energy_broken_sym, ".6f")
+    if bs.delta_e_ev is not None and bs.delta_e_cm is not None:
+        summary.add_row(
+            "E(HS) − E(BS)",
+            Text(f"{bs.delta_e_ev:+.4f} eV  ·  {bs.delta_e_cm:+,.2f} cm⁻¹", style="bright_white"),
+        )
+    body.add_row(summary)
+
+    # Alternative J formulas.
+    alt = Table.grid(padding=(0, 2))
+    alt.add_column(style="dim", no_wrap=True)
+    alt.add_column(no_wrap=True)
+    alt.add_column(style="italic dim", no_wrap=True)
+    if bs.j2_bencini is not None:
+        alt.add_row("J(2)", Text(f"{bs.j2_bencini:+,.2f} cm⁻¹"), "Bencini–Gatteschi")
+    if bs.j3_yamaguchi is not None:
+        alt.add_row("J(3)", Text(f"{bs.j3_yamaguchi:+,.2f} cm⁻¹"), "Yamaguchi")
+    if bs.j2_bencini is not None or bs.j3_yamaguchi is not None:
+        body.add_row(Rule(style="dim"))
+        body.add_row(Text("Alternative formulas", style="dim"))
+        body.add_row(alt)
+
+    return Panel(body, title="Broken-symmetry magnetic coupling", border_style="red", padding=(0, 1))
 
 
 def _nevpt_panel(results: list[NevptResult]) -> Panel:

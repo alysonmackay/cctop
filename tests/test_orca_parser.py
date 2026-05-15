@@ -581,6 +581,150 @@ TOTAL RUN TIME: 0 days 0 hours 1 minutes 0 seconds
         self.assertAlmostEqual(occs[0].occupation, 0.99969)
         self.assertAlmostEqual(occs[1].occupation, 1.00031)
 
+    def test_sa_casscf_transition_energies(self) -> None:
+        sample = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+! CASSCF def2-TZVP
+%casscf nel 2 norb 2 mult 3,1 nroots 1,1 end
+* xyz 1 3
+H 0 0 0
+H 0 0 1
+*
+
+-----------------------------
+SA-CASSCF TRANSITION ENERGIES
+------------------------------
+
+LOWEST ROOT (ROOT 0 ,MULT 1) =  -2804.589229195 Eh -76316.753 eV
+
+STATE   ROOT MULT  DE/a.u.    DE/eV    DE/cm**-1
+   1:    0    3   0.005368     0.146   1178.1
+   2:    1    3   0.012345     0.336   2710.4
+
+--------------
+DENSITY MATRIX
+--------------
+
+FINAL SINGLE POINT ENERGY     -2804.589229195
+TOTAL RUN TIME: 0 days 0 hours 1 minutes 0 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+        calc = self._parse(sample)
+        t = calc.sa_casscf_transitions
+        self.assertIsNotNone(t)
+        assert t is not None
+        self.assertEqual(t.lowest_root, 0)
+        self.assertEqual(t.lowest_multiplicity, 1)
+        self.assertAlmostEqual(t.lowest_energy_eh, -2804.589229195)
+        self.assertEqual(len(t.transitions), 2)
+        self.assertEqual(t.transitions[0].state_index, 1)
+        self.assertEqual(t.transitions[0].multiplicity, 3)
+        self.assertAlmostEqual(t.transitions[0].de_cm, 1178.1)
+        self.assertAlmostEqual(t.transitions[1].de_cm, 2710.4)
+
+    def test_broken_symmetry_coupling(self) -> None:
+        sample = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+! UKS B3LYP def2-TZVP
+* xyz 0 1
+H 0 0 0
+H 0 0 1
+*
+
+------------------------------------------
+BROKEN SYMMETRY MAGNETIC COUPLING ANALYSIS
+------------------------------------------
+
+S(High-Spin)      =   1.0
+<S**2>(High-Spin) =   2.0104
+<S**2>(BrokenSym) =   0.5102
+E(High-Spin)      = -2583.057910 Eh
+E(BrokenSym)      = -2583.065401 Eh
+E(High-Spin)-E(BrokenSym)= 0.2038 eV   1644.018 cm**-1 (ANTIFERROMAGNETIC coupling)
+
+          ---------------------------------------------------------
+          | Spin-Hamiltonian Analysis based on H(HDvV)= -2J*SA*SB |
+    -------                                                       -----------
+    | J(1) =   -1644.02 cm**-1    (from -(E[HS]-E[BS])/Smax**2)             |
+    | J(2) =    -822.01 cm**-1    (from -(E[HS]-E[BS])/(Smax*(Smax+1))      |
+    | J(3) =   -1095.89 cm**-1    (from -(E[HS]-E[BS])/(<S**2>HS-<S**2>BS)) |
+    -------------------------------------------------------------------------
+
+FINAL SINGLE POINT ENERGY     -2583.065401000000
+TOTAL RUN TIME: 0 days 0 hours 1 minutes 0 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+        calc = self._parse(sample)
+        bs = calc.bs_coupling
+        self.assertIsNotNone(bs)
+        assert bs is not None
+        self.assertAlmostEqual(bs.s_high_spin or 0.0, 1.0)
+        self.assertAlmostEqual(bs.s2_high_spin or 0.0, 2.0104)
+        self.assertAlmostEqual(bs.s2_broken_sym or 0.0, 0.5102)
+        self.assertAlmostEqual(bs.energy_high_spin or 0.0, -2583.057910)
+        self.assertAlmostEqual(bs.energy_broken_sym or 0.0, -2583.065401)
+        self.assertAlmostEqual(bs.delta_e_ev or 0.0, 0.2038)
+        self.assertAlmostEqual(bs.delta_e_cm or 0.0, 1644.018)
+        self.assertEqual(bs.coupling_type, "antiferromagnetic")
+        self.assertAlmostEqual(bs.j1_noodleman or 0.0, -1644.02)
+        self.assertAlmostEqual(bs.j2_bencini or 0.0, -822.01)
+        self.assertAlmostEqual(bs.j3_yamaguchi or 0.0, -1095.89)
+
+    def test_bs_coupling_uses_last_block(self) -> None:
+        # If a scan produces multiple blocks, the parser must report the last one.
+        sample = """
+O   R   C   A
+Program Version 6.0.0
+
+INPUT FILE
+! UKS B3LYP def2-TZVP
+* xyz 0 1
+H 0 0 0
+H 0 0 1
+*
+
+------------------------------------------
+BROKEN SYMMETRY MAGNETIC COUPLING ANALYSIS
+------------------------------------------
+
+S(High-Spin)      =   1.0
+<S**2>(High-Spin) =   2.0
+<S**2>(BrokenSym) =   1.0
+E(High-Spin)      = -100.0 Eh
+E(BrokenSym)      = -100.1 Eh
+E(High-Spin)-E(BrokenSym)= 0.1 eV   100.0 cm**-1 (ANTIFERROMAGNETIC coupling)
+    | J(1) =   -100.00 cm**-1    (foo) |
+
+------------------------------------------
+BROKEN SYMMETRY MAGNETIC COUPLING ANALYSIS
+------------------------------------------
+
+S(High-Spin)      =   1.0
+<S**2>(High-Spin) =   1.8
+<S**2>(BrokenSym) =   0.2
+E(High-Spin)      = -200.0 Eh
+E(BrokenSym)      = -200.5 Eh
+E(High-Spin)-E(BrokenSym)= 0.5 eV   500.0 cm**-1 (FERROMAGNETIC coupling)
+    | J(1) =    -500.00 cm**-1    (foo) |
+
+FINAL SINGLE POINT ENERGY     -200.5
+TOTAL RUN TIME: 0 days 0 hours 1 minutes 0 seconds
+****ORCA TERMINATED NORMALLY****
+"""
+        calc = self._parse(sample)
+        bs = calc.bs_coupling
+        self.assertIsNotNone(bs)
+        assert bs is not None
+        self.assertEqual(bs.coupling_type, "ferromagnetic")
+        self.assertAlmostEqual(bs.j1_noodleman or 0.0, -500.0)
+        self.assertAlmostEqual(bs.energy_high_spin or 0.0, -200.0)
+
     def test_uses_latest_frequency_block(self) -> None:
         calc = self._parse(ORCA_TS_WITH_MULTIPLE_FREQUENCY_BLOCKS)
         self.assertEqual(calc.status, Status.SUSPICIOUS)

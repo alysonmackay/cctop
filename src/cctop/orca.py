@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .models import (
     ActiveOccupation,
+    BrokenSymmetryCoupling,
     Calculation,
     ConfigWeight,
     JobType,
@@ -14,6 +15,8 @@ from .models import (
     LocalizedOrbitals,
     McscfState,
     NevptResult,
+    SaCasscfTransitions,
+    SaTransition,
     Status,
     Warning,
 )
@@ -233,6 +236,8 @@ def parse_orca(path: Path) -> Calculation:
     calc.nevpt2_results = _parse_nevpt2_results(lines)
     calc.localized_orbitals = _parse_localized_orbitals(lines)
     calc.active_occupations = _parse_active_occupations(lines, calc.localized_orbitals)
+    calc.sa_casscf_transitions = _parse_sa_casscf_transitions(lines)
+    calc.bs_coupling = _parse_bs_coupling(lines)
     calc.method = _refine_method(calc.method, lines)
 
     calc.warnings.extend(_collect_warnings(lines, frequencies))
@@ -832,3 +837,129 @@ def _parse_active_occupations(
         mo_indices = list(range(1, len(last_values) + 1))
 
     return [ActiveOccupation(mo=mo, occupation=occ) for mo, occ in zip(mo_indices, last_values)]
+
+
+SA_LOWEST_ROOT_RE = re.compile(
+    r"LOWEST ROOT\s*\(\s*ROOT\s+(\d+)\s*,\s*MULT\s+(\d+)\s*\)\s*=\s*(" + FLOAT_RE + r")\s+Eh",
+    re.I,
+)
+SA_TRANSITION_ROW_RE = re.compile(
+    r"^\s*(\d+):\s+(\d+)\s+(\d+)\s+("
+    + FLOAT_RE
+    + r")\s+("
+    + FLOAT_RE
+    + r")\s+("
+    + FLOAT_RE
+    + r")\s*$"
+)
+
+
+def _parse_sa_casscf_transitions(lines: list[str]) -> SaCasscfTransitions | None:
+    """Parse the SA-CASSCF TRANSITION ENERGIES table.
+
+    If the section appears multiple times we keep the last occurrence (matches
+    the final state-averaged calculation in any multi-pass run).
+    """
+    starts = [i for i, line in enumerate(lines) if "SA-CASSCF TRANSITION ENERGIES" in line]
+    if not starts:
+        return None
+    start = starts[-1]
+
+    lowest_match = None
+    rows_start = start
+    for i in range(start + 1, min(start + 30, len(lines))):
+        match = SA_LOWEST_ROOT_RE.search(lines[i])
+        if match:
+            lowest_match = match
+            rows_start = i
+            break
+    if lowest_match is None:
+        return None
+
+    result = SaCasscfTransitions(
+        lowest_root=int(lowest_match.group(1)),
+        lowest_multiplicity=int(lowest_match.group(2)),
+        lowest_energy_eh=float(lowest_match.group(3)),
+    )
+
+    for line in lines[rows_start + 1 :]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("---", "===")) or stripped.startswith("STATE"):
+            continue
+        if stripped.startswith("DENSITY") or stripped.startswith("Extracting") or stripped.startswith("Trace"):
+            break
+        match = SA_TRANSITION_ROW_RE.match(line)
+        if match:
+            result.transitions.append(
+                SaTransition(
+                    state_index=int(match.group(1)),
+                    root=int(match.group(2)),
+                    multiplicity=int(match.group(3)),
+                    de_eh=float(match.group(4)),
+                    de_ev=float(match.group(5)),
+                    de_cm=float(match.group(6)),
+                )
+            )
+            continue
+        # Bail once we leave the table.
+        break
+
+    return result if result.transitions else None
+
+
+BS_SHS_RE = re.compile(r"^\s*S\(High-Spin\)\s*=\s*(" + FLOAT_RE + r")", re.I)
+BS_S2_HS_RE = re.compile(r"^\s*<S\*\*2>\(High-Spin\)\s*=\s*(" + FLOAT_RE + r")", re.I)
+BS_S2_BS_RE = re.compile(r"^\s*<S\*\*2>\(BrokenSym\)\s*=\s*(" + FLOAT_RE + r")", re.I)
+BS_E_HS_RE = re.compile(r"^\s*E\(High-Spin\)\s*=\s*(" + FLOAT_RE + r")\s+Eh", re.I)
+BS_E_BS_RE = re.compile(r"^\s*E\(BrokenSym\)\s*=\s*(" + FLOAT_RE + r")\s+Eh", re.I)
+BS_DELTA_RE = re.compile(
+    r"E\(High-Spin\)-E\(BrokenSym\)\s*=\s*(" + FLOAT_RE + r")\s+eV\s+(" + FLOAT_RE + r")\s+cm\*\*-1"
+    r"\s*\((\w+)\s+coupling\)",
+    re.I,
+)
+BS_J_RE = re.compile(r"\|\s*J\((\d)\)\s*=\s*(" + FLOAT_RE + r")\s+cm\*\*-1", re.I)
+
+
+def _parse_bs_coupling(lines: list[str]) -> BrokenSymmetryCoupling | None:
+    """Parse the BROKEN SYMMETRY MAGNETIC COUPLING ANALYSIS block.
+
+    Multiple blocks may appear (e.g. relaxed scans); keep the last one, which
+    corresponds to the most recently converged geometry.
+    """
+    starts = [i for i, line in enumerate(lines) if "BROKEN SYMMETRY MAGNETIC COUPLING ANALYSIS" in line]
+    if not starts:
+        return None
+    start = starts[-1]
+    end = min(start + 80, len(lines))  # block is short — bounded read is plenty
+
+    bs = BrokenSymmetryCoupling()
+    for line in lines[start:end]:
+        if (m := BS_SHS_RE.search(line)):
+            bs.s_high_spin = float(m.group(1))
+        elif (m := BS_S2_HS_RE.search(line)):
+            bs.s2_high_spin = float(m.group(1))
+        elif (m := BS_S2_BS_RE.search(line)):
+            bs.s2_broken_sym = float(m.group(1))
+        elif (m := BS_E_HS_RE.search(line)):
+            bs.energy_high_spin = float(m.group(1))
+        elif (m := BS_E_BS_RE.search(line)):
+            bs.energy_broken_sym = float(m.group(1))
+        elif (m := BS_DELTA_RE.search(line)):
+            bs.delta_e_ev = float(m.group(1))
+            bs.delta_e_cm = float(m.group(2))
+            bs.coupling_type = m.group(3).lower()
+        elif (m := BS_J_RE.search(line)):
+            j_value = float(m.group(2))
+            if m.group(1) == "1":
+                bs.j1_noodleman = j_value
+            elif m.group(1) == "2":
+                bs.j2_bencini = j_value
+            elif m.group(1) == "3":
+                bs.j3_yamaguchi = j_value
+
+    # Require at least the J(1) value or HS/BS energies to count as a real block.
+    if bs.j1_noodleman is None and bs.energy_high_spin is None:
+        return None
+    return bs

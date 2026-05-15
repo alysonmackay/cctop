@@ -70,6 +70,39 @@ class ActiveOccupation:
 
 
 @dataclass(slots=True)
+class SaTransition:
+    state_index: int
+    root: int
+    multiplicity: int
+    de_eh: float
+    de_ev: float
+    de_cm: float
+
+
+@dataclass(slots=True)
+class SaCasscfTransitions:
+    lowest_root: int
+    lowest_multiplicity: int
+    lowest_energy_eh: float
+    transitions: list[SaTransition] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class BrokenSymmetryCoupling:
+    s_high_spin: float | None = None
+    s2_high_spin: float | None = None
+    s2_broken_sym: float | None = None
+    energy_high_spin: float | None = None
+    energy_broken_sym: float | None = None
+    delta_e_ev: float | None = None
+    delta_e_cm: float | None = None
+    coupling_type: str | None = None  # "antiferromagnetic" or "ferromagnetic"
+    j1_noodleman: float | None = None
+    j2_bencini: float | None = None
+    j3_yamaguchi: float | None = None
+
+
+@dataclass(slots=True)
 class NevptResult:
     root: int
     multiplicity: int | None
@@ -104,6 +137,8 @@ class Calculation:
     nevpt2_results: list[NevptResult] = field(default_factory=list)
     localized_orbitals: LocalizedOrbitals | None = None
     active_occupations: list[ActiveOccupation] = field(default_factory=list)
+    sa_casscf_transitions: SaCasscfTransitions | None = None
+    bs_coupling: BrokenSymmetryCoupling | None = None
 
     @property
     def warning_count(self) -> int:
@@ -122,6 +157,8 @@ class Calculation:
             "nevpt2_results",
             "localized_orbitals",
             "active_occupations",
+            "sa_casscf_transitions",
+            "bs_coupling",
         ):
             record.pop(key, None)
         return record
